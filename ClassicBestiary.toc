@@ -1,0 +1,30 @@
+## Interface: 16001, 11509
+## Title: Classic Bestiary
+## Notes: Display creature ability details in tooltips
+## Author: Tibru Tek
+## Version: 2.0.20261025
+## IconTexture: Interface\AddOns\ClassicBestiary\bestiary.tga
+## Category: Combat
+## Category-deDE: Kampf
+## Category-esES: Combate
+## Category-esMX: Combate
+## Category-frFR: Combat
+## Category-itIT: Combattimento
+## Category-koKR: 전투
+## Category-ptBR: Combate
+## Category-ruRU: Бой
+## Category-zhCN: 战斗
+## Category-zhTW: 戰鬥
+## SavedVariables: ClassicBestiaryCfg
+## AllowLoadGameType: forever, camelot, vanilla
+
+Data\Forever.lua [AllowLoadGameType forever, camelot]
+Data\ForeverExclusions.lua [AllowLoadGameType forever, camelot]
+Data\Classic.lua [AllowLoadGameType vanilla]
+Data\ClassicExclusions.lua [AllowLoadGameType vanilla]
+localization.lua
+locales\enUS.lua
+api.lua
+config.lua
+tooltip.lua
+ClassicBestiary.lua
