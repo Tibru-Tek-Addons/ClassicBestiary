@@ -1,0 +1,36 @@
+name: Package and release
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the ClassicBestiary destination
+        run: test "$GITHUB_REPOSITORY" = "Tibru-Tek-Addons/ClassicBestiary"
+      - name: Package addon ZIP
+        uses: BigWigsMods/packager@e50a250f8705041e40f2fa1ddcb280a686d65aa0 # v2.6.1
+        with:
+          args: -d -u -p 0 -w 0 -a 0 -n "{package-name}-{project-version}"
+          pandoc: 'false'
+      - name: Publish immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          archive=".release/ClassicBestiary-${GITHUB_REF_NAME}.zip"
+          gh release create "$GITHUB_REF_NAME" "$archive" \
+            --verify-tag --draft --title "$GITHUB_REF_NAME" \
+            --notes-file .release/ClassicBestiary/CHANGELOG.md
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest

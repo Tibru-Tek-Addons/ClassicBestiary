@@ -1,0 +1,9 @@
+package-as: ClassicBestiary
+manual-changelog:
+  filename: CHANGELOG.md
+  markup-type: markdown
+plain-copy:
+  - CHANGELOG.md
+ignore:
+  - .github
+  - .pkgmeta
