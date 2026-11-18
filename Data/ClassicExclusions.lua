@@ -1,5 +1,5 @@
 local _, CB = ...
-CB.excludedSpells={[1604]=true,[5101]=true,[13496]=true,[15571]=true,[26683]=true}
+CB.excludedSpells={[1604]=true,[5101]=true,[13138]=true,[13496]=true,[15571]=true,[26683]=true,[26740]=true}
 CB.effectTargeting={
 [45]={[2]={"aoe"}},
 [568]={[1]={"aoe"},[2]={"aoe"},[3]={"aoe"}},

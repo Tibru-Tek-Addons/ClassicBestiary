@@ -7,11 +7,32 @@ local defaults = {
     reminder = true,
     ignoreFriendly = false,
     enabled = true,
+    font = "default",
+    fontStyle = "default",
     debugIDs = false,
     debugDetails = false,
 }
 local modes = { spells = true, spells_compact = true, effects = true, effects_compact = true }
 local expansions = { ctrl = true, shift = true, alt = true, never = true, always = true }
+local fontStyleOrder = {
+    { value = "default", label = L.FONT_STYLE_DEFAULT },
+    { value = "10", label = "10", size = 10, flags = "" },
+    { value = "11", label = "11", size = 11, flags = "" },
+    { value = "12", label = "12", size = 12, flags = "" },
+    { value = "13", label = "13", size = 13, flags = "" },
+    { value = "14", label = "14", size = 14, flags = "" },
+    { value = "16", label = "16", size = 16, flags = "" },
+    { value = "18", label = "18", size = 18, flags = "" },
+    { value = "12:OUTLINE", label = string.format(L.FONT_STYLE_OUTLINE, 12), size = 12, flags = "OUTLINE" },
+    { value = "14:OUTLINE", label = string.format(L.FONT_STYLE_OUTLINE, 14), size = 14, flags = "OUTLINE" },
+    { value = "16:OUTLINE", label = string.format(L.FONT_STYLE_OUTLINE, 16), size = 16, flags = "OUTLINE" },
+    { value = "12:THICKOUTLINE", label = string.format(L.FONT_STYLE_THICK_OUTLINE, 12), size = 12, flags = "THICKOUTLINE" },
+    { value = "14:THICKOUTLINE", label = string.format(L.FONT_STYLE_THICK_OUTLINE, 14), size = 14, flags = "THICKOUTLINE" },
+}
+local fontStyles = {}
+for _, preset in ipairs(fontStyleOrder) do fontStyles[preset.value] = preset end
+CB.fontStyles = fontStyles
+local fontChoices, fontDefaults
 local category
 local settings = {}
 local panel
@@ -31,6 +52,78 @@ local function BooleanValue(value, default)
     return default
 end
 
+local knownFonts = {
+    ["FRIZQT__.TTF"] = "Friz Quadrata",
+    ["FRIZQT___CYR.TTF"] = "Friz Quadrata (Cyrillic)",
+    ["ARIALN.TTF"] = "Arial Narrow",
+    ["ARIAL.TTF"] = "Arial",
+    ["MORPHEUS.TTF"] = "Morpheus",
+    ["SKURRI.TTF"] = "Skurri",
+}
+
+local function FontLabel(face, fallback)
+    local base = face:gsub("\\", "/"):match("([^/]+)$") or face
+    local label = knownFonts[base:upper()]
+    if not label then
+        label = base:gsub("%.[Tt][Tt][Ff]$", ""):gsub("_+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    end
+    return label ~= "" and label or fallback
+end
+
+local function EnsureFonts()
+    if fontChoices and #fontChoices > 0 then
+        return
+    end
+    fontChoices, fontDefaults = {}, {}
+    CB.fontDefaults = fontDefaults
+    if type(GetFonts) ~= "function" or type(GetFontInfo) ~= "function" then
+        return
+    end
+    local seen = {}
+    local ok, names = pcall(GetFonts)
+    if not ok or type(names) ~= "table" then
+        return
+    end
+    for _, name in ipairs(names) do
+        local infoOk, info = pcall(GetFontInfo, name)
+        if not infoOk then info = nil end
+        local object = info and info.fontObject
+        if not (object and object.GetFont) then object = _G[name] end
+        local face, height, flags
+        if object and object.GetFont then
+            face, height, flags = object:GetFont()
+        end
+        if info then
+            face = face or info.fontFile
+            height = info.height or height
+            flags = info.outline or flags or ""
+        end
+        if type(face) == "string" and face ~= "" then
+            fontDefaults[name] = { face = face, height = tonumber(height), flags = flags or "" }
+            local key = face:lower()
+            if not seen[key] then
+                seen[key] = true
+                fontChoices[#fontChoices + 1] = { value = name, text = FontLabel(face, name) }
+            end
+        end
+    end
+    table.sort(fontChoices, function(left, right) return left.text < right.text end)
+end
+
+local function NormalizeFont(value)
+    EnsureFonts()
+    if type(value) ~= "string" then
+        return "default"
+    end
+    if value == "" or value == "default" then
+        return "default"
+    end
+    if #fontChoices == 0 then
+        return value
+    end
+    return fontDefaults[value] and value or "default"
+end
+
 function CB.InitializeConfig()
     local saved = ClassicBestiaryCfg
     if type(saved) ~= "table" then
@@ -42,6 +135,8 @@ function CB.InitializeConfig()
     local reminder = saved.reminder
     local ignoreFriendly = saved.ignoreFriendly
     local enabled = saved.enabled
+    local font = saved.font
+    local fontStyle = saved.fontStyle
     local debugIDs = saved.debugIDs
     local debugDetails = saved.debugDetails
 
@@ -54,6 +149,8 @@ function CB.InitializeConfig()
     saved.reminder = BooleanValue(reminder, defaults.reminder)
     saved.ignoreFriendly = BooleanValue(ignoreFriendly, defaults.ignoreFriendly)
     saved.enabled = BooleanValue(enabled, defaults.enabled)
+    saved.font = NormalizeFont(font)
+    saved.fontStyle = type(fontStyle) == "string" and fontStyles[fontStyle] and fontStyle or defaults.fontStyle
     saved.debugIDs = BooleanValue(debugIDs, defaults.debugIDs)
     saved.debugDetails = BooleanValue(debugDetails, defaults.debugDetails)
     ClassicBestiaryCfg = saved
@@ -77,6 +174,24 @@ local function ExpansionOptions()
     options:Add("alt", L.MODIFIER_ALT)
     options:Add("never", L.EXPANSION_NEVER)
     options:Add("always", L.EXPANSION_ALWAYS)
+    return options:GetData()
+end
+
+local function FontOptions()
+    EnsureFonts()
+    local options = Settings.CreateControlTextContainer()
+    options:Add("default", L.FONT_DEFAULT)
+    for _, choice in ipairs(fontChoices) do
+        options:Add(choice.value, choice.text)
+    end
+    return options:GetData()
+end
+
+local function FontStyleOptions()
+    local options = Settings.CreateControlTextContainer()
+    for _, preset in ipairs(fontStyleOrder) do
+        options:Add(preset.value, preset.label)
+    end
     return options:GetData()
 end
 
@@ -144,7 +259,8 @@ local function LayoutControl(control, parent, x, y, width)
     return height
 end
 
-local mainKeys = { "enabled", "mode", "expansion", "reminder", "ignoreFriendly" }
+local mainKeys = { "enabled", "mode" }
+local afterFontKeys = { "expansion", "reminder", "ignoreFriendly" }
 local debugKeys = { "debugIDs", "debugDetails" }
 
 -- GameTooltip has no maximum-width API. Only oversized static previews need
@@ -215,6 +331,14 @@ local function LayoutPanel()
     LayoutSelector(panel.PreviewSelector, columnWidth)
     y = y + panel.PreviewSelector:GetHeight() + 20
     for _, key in ipairs(mainKeys) do
+        y = y + LayoutControl(panel.Controls[key], panel.Options, 0, y, columnWidth) + 12
+    end
+    local fontWidth = math.max(1, math.floor((columnWidth - 12) * 0.55))
+    local styleWidth = math.max(1, columnWidth - fontWidth - 12)
+    local fontHeight = LayoutControl(panel.Controls.font, panel.Options, 0, y, fontWidth)
+    local styleHeight = LayoutControl(panel.Controls.fontStyle, panel.Options, fontWidth + 12, y, styleWidth)
+    y = y + math.max(fontHeight, styleHeight) + 12
+    for _, key in ipairs(afterFontKeys) do
         y = y + LayoutControl(panel.Controls[key], panel.Options, 0, y, columnWidth) + 12
     end
     panel.Options:SetSize(columnWidth, y)
@@ -344,6 +468,8 @@ function CB.RegisterSettings()
     category = Settings.RegisterCanvasLayoutCategory(panel, L.ADDON_NAME)
     RegisterSetting(panel.Options, "enabled", L.OPTION_ENABLED, L.OPTION_ENABLED_HELP)
     RegisterSetting(panel.Options, "mode", L.OPTION_MODE, L.OPTION_MODE_HELP, ModeOptions)
+    RegisterSetting(panel.Options, "font", L.OPTION_FONT, L.OPTION_FONT_HELP, FontOptions)
+    RegisterSetting(panel.Options, "fontStyle", L.OPTION_FONT_STYLE, L.OPTION_FONT_STYLE_HELP, FontStyleOptions)
     RegisterSetting(panel.Options, "expansion", L.OPTION_EXPANSION, L.OPTION_EXPANSION_HELP, ExpansionOptions)
     RegisterSetting(panel.Options, "reminder", L.OPTION_REMINDER, L.OPTION_REMINDER_HELP)
     RegisterSetting(panel.Options, "ignoreFriendly", L.OPTION_IGNORE_FRIENDLY, L.OPTION_IGNORE_FRIENDLY_HELP)

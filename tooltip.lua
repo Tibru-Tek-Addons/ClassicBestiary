@@ -33,24 +33,102 @@ local function checkpoint()
     if steps >= FRAME_STEPS or GetTimePreciseSec() >= deadline then coroutine.yield() end
 end
 
+local function captureFont(fontString)
+    local face, size, flags = fontString:GetFont()
+    return {
+        fontString = fontString,
+        face = face,
+        size = size,
+        flags = flags,
+        scale = fontString:GetTextScale(),
+        spacing = fontString:GetSpacing(),
+        nonSpaceWrap = fontString.CanNonSpaceWrap and fontString:CanNonSpaceWrap() or nil,
+        fontObject = fontString.GetFontObject and fontString:GetFontObject() or nil,
+    }
+end
+
+local function restoreFont(owned)
+    local fontString = owned.fontString
+    if owned.fontObject and fontString.SetFontObject then
+        fontString:SetFontObject(owned.fontObject)
+    else
+        fontString:SetFont(owned.face, owned.size, owned.flags)
+    end
+    fontString:SetTextScale(owned.scale)
+    fontString:SetSpacing(owned.spacing)
+    if owned.nonSpaceWrap ~= nil then fontString:SetNonSpaceWrap(owned.nonSpaceWrap) end
+end
+
 local function clear(tooltip)
     local state = states[tooltip]
     if not state then return end
     states[tooltip] = nil
     for _, owned in pairs(state.lines) do
-        if owned.compact then owned.fontString:SetNonSpaceWrap(owned.nonSpaceWrap) end
+        restoreFont(owned)
+        if owned.rightOwned then restoreFont(owned.rightOwned) end
     end
     for _, cancel in pairs(state.cancels) do cancel() end
     state.worker, state.mechanics = nil, nil
 end
 
+local function resolveFont(body)
+    local face, size, flags = body:GetFont()
+    local config = CB.config
+    if not config then return face, size, flags end
+    local selected = config.font
+    if selected == "" then selected = nil end
+    if selected == "default" then selected = nil end
+    local preset = CB.fontStyles and CB.fontStyles[config.fontStyle or "default"]
+    local defaults = type(selected) == "string" and CB.fontDefaults and CB.fontDefaults[selected]
+    local override = false
+    if defaults then
+        face = defaults.face or face
+        if not preset or preset.size == nil then
+            size = defaults.height or size
+            flags = defaults.flags or flags
+        end
+        override = true
+    end
+    if preset and preset.size ~= nil then
+        size, flags = preset.size, preset.flags or ""
+        override = true
+    end
+    if override then return face, size, flags end
+    local fontObject = body == GameTooltipText and body or nil
+    if not fontObject and body.GetFontObject then fontObject = body:GetFontObject() end
+    if fontObject and not fontObject.GetFont then fontObject = nil end
+    if fontObject then
+        local objectFace, objectSize, objectFlags = fontObject:GetFont()
+        if objectFace ~= face or objectSize ~= size or objectFlags ~= flags then fontObject = nil end
+    end
+    return face, size, flags, fontObject
+end
+
 local function style(fontString, body, text, compact)
-    fontString:SetFont(body:GetFont())
+    local face, size, flags, fontObject = resolveFont(body)
+    if fontObject then
+        fontString:SetFontObject(fontObject)
+    else
+        fontString:SetFont(face, size, flags)
+    end
     fontString:SetTextScale(body == GameTooltipText and 1 or body:GetTextScale())
     fontString:SetSpacing(body:GetSpacing())
     fontString:SetWordWrap(true)
     if compact then fontString:SetNonSpaceWrap(false) end
     fontString:SetText(text)
+end
+
+local function separator()
+    checkpoint()
+    local tooltip = current.tooltip
+    tooltip:AddLine(" ", 0.9, 0.9, 0.9, true)
+    local index = tooltip:NumLines()
+    local fontString = tooltip:GetLeftLine(index)
+    local owned = captureFont(fontString)
+    style(fontString, current.body, " ", false)
+    owned.left, owned.compact = " ", false
+    current.lines[index] = owned
+    current.lastLine = index
 end
 
 local function boundedText(text)
@@ -73,6 +151,10 @@ local function line(text, muted, right, compact)
     if right then right = boundedText(right) end
     local shade = muted and 0.65 or 0.9
     local tooltip = current.tooltip
+    if not current.started then
+        current.started = true
+        separator()
+    end
     if right and right ~= "" then
         tooltip:AddDoubleLine(text, right, shade, shade, shade, shade, shade, shade)
     else
@@ -81,10 +163,14 @@ local function line(text, muted, right, compact)
     end
     local index = tooltip:NumLines()
     local fontString = tooltip:GetLeftLine(index)
-    local owned = { left = text, right = right, compact = compact }
-    if compact then owned.fontString, owned.nonSpaceWrap = fontString, fontString:CanNonSpaceWrap() end
+    local owned = captureFont(fontString)
+    owned.left, owned.right, owned.compact = text, right, compact
     style(fontString, current.body, text, compact)
-    if right then style(tooltip:GetRightLine(index), current.body, right) end
+    if right then
+        local rightString = tooltip:GetRightLine(index)
+        owned.rightOwned = captureFont(rightString)
+        style(rightString, current.body, right)
+    end
     current.lines[index], current.lastLine = owned, index
     current.rows = current.rows + 1
     if limit then error(ROW_LIMIT, 0) end
@@ -946,7 +1032,7 @@ local function drawAbilities(tooltip, npcID)
     local body = tooltip:NumLines() > 1 and tooltip:GetLeftLine(tooltip:NumLines()) or GameTooltipText
     local state = { tooltip = tooltip, npcID = npcID, spells = {}, mechanics = {}, children = {}, cancels = {},
         directProfiles = {}, ownProfiles = {}, childOwnProfiles = {},
-        body = body, lines = {}, rows = 0, firstLine = tooltip:NumLines() + 1 }
+        body = body, lines = {}, rows = 0, started = false, firstLine = tooltip:NumLines() + 1 }
     state.face, state.size, state.flags = body:GetFont()
     state.scale, state.spacing = body == GameTooltipText and 1 or body:GetTextScale(), body:GetSpacing()
     state.worker = coroutine.create(function() abilities(npcID) end)
