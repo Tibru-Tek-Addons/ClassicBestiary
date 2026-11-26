@@ -13,6 +13,7 @@ local textChanged
 -- One budget for all tooltips. Native calls cannot be preempted, so their
 -- inputs are bounded too; diagnostic trees cannot grow a giant tooltip.
 local FRAME_SECONDS, FRAME_STEPS = 0.002, 512
+local TEXT_REFRESH_DELAY = 0.1
 local MAX_ROWS, MAX_TEXT = 200, 2048
 local ROW_LIMIT = {}
 local scheduler
@@ -118,17 +119,71 @@ local function style(fontString, body, text, compact)
     fontString:SetText(text)
 end
 
-local function separator()
-    checkpoint()
-    local tooltip = current.tooltip
+local function addSeparator(state)
+    local tooltip = state.tooltip
     tooltip:AddLine(" ", 0.9, 0.9, 0.9, true)
     local index = tooltip:NumLines()
     local fontString = tooltip:GetLeftLine(index)
     local owned = captureFont(fontString)
-    style(fontString, current.body, " ", false)
+    style(fontString, state.body, " ", false)
     owned.left, owned.compact = " ", false
-    current.lines[index] = owned
-    current.lastLine = index
+    state.lines[index] = owned
+    state.lastLine = index
+end
+
+local function addRow(state, row)
+    local tooltip = state.tooltip
+    local shade = row.muted and 0.65 or 0.9
+    if row.right then
+        tooltip:AddDoubleLine(row.text, row.right, shade, shade, shade, shade, shade, shade)
+    else
+        tooltip:AddLine(row.text, shade, shade, shade, true)
+    end
+    local index = tooltip:NumLines()
+    local fontString = tooltip:GetLeftLine(index)
+    local owned = captureFont(fontString)
+    owned.left, owned.right, owned.compact = row.text, row.right, row.compact
+    style(fontString, state.body, row.text, row.compact)
+    if row.right then
+        local rightString = tooltip:GetRightLine(index)
+        owned.rightOwned = captureFont(rightString)
+        style(rightString, state.body, row.right)
+    end
+    state.lines[index], state.lastLine = owned, index
+end
+
+local function flushRows(state)
+    if states[state.tooltip] ~= state or state.flushed then return false end
+    state.flushed = true
+    local rows = state.pending
+    state.pending = nil
+    if not rows or #rows == 0 then return false end
+    local previous = current
+    current = state
+    addSeparator(state)
+    for index = 1, #rows do addRow(state, rows[index]) end
+    current = previous
+    return true
+end
+
+local function runWorker(state)
+    local worker = state.worker
+    local previous = current
+    current = state
+    local ok, message = coroutine.resume(worker)
+    current = previous
+    if not ok or coroutine.status(worker) == "dead" then
+        state.worker, state.mechanics = nil, nil
+    end
+    if not ok and message ~= ROW_LIMIT then geterrorhandler()(message) end
+end
+
+local function pumpRows(state)
+    steps, deadline = 0, GetTimePreciseSec() + FRAME_SECONDS
+    runWorker(state)
+    if state.worker then return false end
+    if states[state.tooltip] == state then flushRows(state) end
+    return true
 end
 
 local function boundedText(text)
@@ -149,29 +204,8 @@ local function line(text, muted, right, compact)
     if limit then text, muted, right, compact = L.DETAILS_LIMIT, true, nil, nil end
     text = boundedText(text)
     if right then right = boundedText(right) end
-    local shade = muted and 0.65 or 0.9
-    local tooltip = current.tooltip
-    if not current.started then
-        current.started = true
-        separator()
-    end
-    if right and right ~= "" then
-        tooltip:AddDoubleLine(text, right, shade, shade, shade, shade, shade, shade)
-    else
-        tooltip:AddLine(text, shade, shade, shade, true)
-        right = nil
-    end
-    local index = tooltip:NumLines()
-    local fontString = tooltip:GetLeftLine(index)
-    local owned = captureFont(fontString)
-    owned.left, owned.right, owned.compact = text, right, compact
-    style(fontString, current.body, text, compact)
-    if right then
-        local rightString = tooltip:GetRightLine(index)
-        owned.rightOwned = captureFont(rightString)
-        style(rightString, current.body, right)
-    end
-    current.lines[index], current.lastLine = owned, index
+    if right == "" then right = nil end
+    current.pending[#current.pending + 1] = { text = text, muted = muted, right = right, compact = compact }
     current.rows = current.rows + 1
     if limit then error(ROW_LIMIT, 0) end
 end
@@ -887,6 +921,14 @@ local function expanded()
     return false
 end
 
+local function expansionChanged()
+    local value = expanded()
+    for _, state in pairs(states) do
+        if state.expanded ~= value then return true end
+    end
+    return false
+end
+
 local function compactEntry(text, ids)
     -- Keep only the icon and first word together; the rest wraps at real spaces.
     local first, rest = text:match("^(|T.-|t %S+)(.*)$")
@@ -1032,12 +1074,17 @@ local function drawAbilities(tooltip, npcID)
     local body = tooltip:NumLines() > 1 and tooltip:GetLeftLine(tooltip:NumLines()) or GameTooltipText
     local state = { tooltip = tooltip, npcID = npcID, spells = {}, mechanics = {}, children = {}, cancels = {},
         directProfiles = {}, ownProfiles = {}, childOwnProfiles = {},
-        body = body, lines = {}, rows = 0, started = false, firstLine = tooltip:NumLines() + 1 }
+        body = body, lines = {}, pending = {}, rows = 0, flushed = false,
+        firstLine = tooltip:NumLines() + 1, expanded = expanded() }
     state.face, state.size, state.flags = body:GetFont()
     state.scale, state.spacing = body == GameTooltipText and 1 or body:GetTextScale(), body:GetSpacing()
+    state.kind = "rows"
     state.worker = coroutine.create(function() abilities(npcID) end)
     states[tooltip] = state
-    enqueue(state)
+    -- Finish ordinary tooltips in this post-call so the client's own Show() sees
+    -- the final rows. Only pathological renders continue on the shared budget.
+    if not pumpRows(state) then enqueue(state)
+    elseif state.textDirty or state.restyle then enqueue(state) end
 end
 
 local function render(tooltip, data)
@@ -1098,14 +1145,28 @@ local function layout(tooltip)
     end
 end
 
+local function restyleLine(fontString, body, text, compact)
+    local face, size, flags = fontString:GetFont()
+    local scale, spacing = fontString:GetTextScale(), fontString:GetSpacing()
+    local nonSpaceWrap = fontString.CanNonSpaceWrap and fontString:CanNonSpaceWrap() or nil
+    style(fontString, body, text, compact)
+    local newFace, newSize, newFlags = fontString:GetFont()
+    return face ~= newFace or size ~= newSize or flags ~= newFlags
+        or scale ~= fontString:GetTextScale() or spacing ~= fontString:GetSpacing()
+        or (fontString.CanNonSpaceWrap and nonSpaceWrap ~= fontString:CanNonSpaceWrap())
+end
+
 local function restyle()
+    local changed = false
     for index = current.firstLine, current.lastLine or current.firstLine - 1 do
         checkpoint()
         local texts = current.lines[index]
-        style(current.tooltip:GetLeftLine(index), current.body, texts.left, texts.compact)
-        if texts.right then style(current.tooltip:GetRightLine(index), current.body, texts.right) end
+        changed = restyleLine(current.tooltip:GetLeftLine(index), current.body, texts.left, texts.compact) or changed
+        if texts.right then
+            changed = restyleLine(current.tooltip:GetRightLine(index), current.body, texts.right) or changed
+        end
     end
-    current.styled = true
+    if changed then current.styled = true end
 end
 
 local function tick()
@@ -1117,29 +1178,36 @@ local function tick()
         if states[state.tooltip] == state then
             if not state.worker and state.restyle then
                 state.restyle = nil
+                state.kind = "style"
                 state.worker = coroutine.create(restyle)
             end
             if state.worker then
-                local previous = current
-                current = state
-                local worker = state.worker
-                local ok, message = coroutine.resume(worker)
-                current = previous
-                if not ok or coroutine.status(worker) == "dead" then
-                    state.worker, state.mechanics = nil, nil
+                runWorker(state)
+                if not state.worker then
+                    local kind = state.kind
+                    state.kind = nil
+                    if kind == "style" then
+                        if state.styled then state.pendingShow = true end
+                    elseif flushRows(state) then
+                        state.pendingShow = true
+                    end
                 end
-                if not ok and message ~= ROW_LIMIT then geterrorhandler()(message) end
-                if states[state.tooltip] == state and (state.lastLine ~= state.publishedLine or state.styled) then
-                    state.publishedLine, state.styled = state.lastLine, nil
+            end
+            if not state.worker then
+                if state.textDirty and not state.textDirtyTimer then
+                    state.textDirty = nil
+                    if state.tooltip == GameTooltip then refreshUnitTooltip()
+                    elseif CB.RefreshPreview then CB.RefreshPreview() end
+                elseif state.pendingShow and not state.restyle then
+                    state.pendingShow = nil
                     state.tooltip:Show()
                     if CB.LayoutPreview then CB.LayoutPreview() end
                 end
-            elseif state.textDirty then
-                state.textDirty = nil
-                if state.tooltip == GameTooltip then refreshUnitTooltip()
-                elseif CB.RefreshPreview then CB.RefreshPreview() end
             end
-            if states[state.tooltip] == state and (state.worker or state.restyle or state.textDirty) then enqueue(state) end
+            if states[state.tooltip] == state
+                and (state.worker or state.restyle or state.pendingShow or (state.textDirty and not state.textDirtyTimer)) then
+                enqueue(state)
+            end
         end
     end
     if head > tail then queue, head, tail = {}, 1, 0; scheduler:Hide() end
@@ -1148,6 +1216,15 @@ end
 textChanged = function(state)
     -- Arriving spell text must not cancel and rebuild an unfinished tree.
     state.textDirty = true
+    if not state.textDirtyTimer then
+        state.textDirtyTimer = true
+        C_Timer.After(TEXT_REFRESH_DELAY, function()
+            if states[state.tooltip] == state and state.textDirty then
+                state.textDirtyTimer = nil
+                enqueue(state)
+            end
+        end)
+    end
     enqueue(state)
 end
 
@@ -1183,7 +1260,7 @@ function CB.InitializeTooltip()
     frame:RegisterEvent("SPELL_TEXT_UPDATE")
     frame:SetScript("OnEvent", function(_, event, spellID)
         if event == "MODIFIER_STATE_CHANGED" then
-            if next(states) then CB.RefreshTooltip() end
+            if expansionChanged() then CB.RefreshTooltip() end
         elseif not issecretvalue(spellID) then
             for _, state in pairs(states) do
                 if state.spells[spellID] then textChanged(state) end
